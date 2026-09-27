@@ -1,0 +1,983 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NEON BEJEWEL</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background-color: #05050b;
+            color: #ffffff;
+            font-family: Arial, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height:85vh;
+            touch-action: none;
+        }
+        h1 {
+            font-size: 2.2rem;
+            color: #fff;
+            text-shadow: 
+                0 0 5px #fff,
+                0 0 10px #fff,
+                0 0 20px #ff00de,
+                0 0 30px #ff00de;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }    
+
+        .game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 15px;
+            padding: 10px;
+        }
+
+        .score-board {
+            display: flex;
+            justify-content: space-between;
+            width: 100%;
+            max-width: 360px;
+            font-size: 20px;
+            font-weight: bold;
+            color: #00f3ff;
+            text-shadow: 0 0 8px rgba(0, 243, 255, 0.5);
+        }
+
+        canvas {
+            border: 3px solid #2a2a4a;
+            border-radius: 8px;
+            box-shadow: 0 0 20px rgba(0, 243, 255, 0.2);
+            background-color: #0d0d18;
+            max-width: 100%;
+            height: auto;
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div class="game-container">
+        <h1>BEJEWEL</h1>        
+        <div class="score-board">
+            <div>Điểm: <span id="score">0</span></div>
+            <div>Combo: <span id="combo">x1</span></div>
+        </div>
+        
+        <canvas id="gameCanvas" width="360" height="480"></canvas>
+    </div>
+
+    <script>
+document.addEventListener('DOMContentLoaded', () => {
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    const scoreEl = document.getElementById('score');
+    const comboEl = document.getElementById('combo');
+
+    const GRID_COLS = 6;
+    const GRID_ROWS = 8;
+    const CELL_SIZE = canvas.width / GRID_COLS;
+    const HALF_CELL = CELL_SIZE / 2;
+
+    // Cấu hình Bảng màu 3D Pha Lê
+    const JEWEL_TYPES = [
+        { main: '#ff0055', light: '#ff99bb', dark: '#80002a', glow: '#ff0055', shape: 'diamond' },
+        { main: '#00d9ff', light: '#b3f6ff', dark: '#005566', glow: '#00f3ff', shape: 'cyan' },
+        { main: '#00ff66', light: '#c8ffe0', dark: '#006629', glow: '#00ff66', shape: 'square' },
+        { main: '#ff00de', light: '#ffb3f5', dark: '#660058', glow: '#ff00de', shape: 'triangle' },
+        { main: '#ffcc00', light: '#fffae6', dark: '#806600', glow: '#ffee00', shape: 'star' },
+        { main: '#a200ff', light: '#e4b3ff', dark: '#410066', glow: '#b000ff', shape: 'hexagon' }
+    ];
+
+    const AudioContext = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = null;
+
+    function initAudio() {
+        if (!audioCtx) audioCtx = new AudioContext();
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+    }
+
+    function playSelectSound() {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(600, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(800, audioCtx.currentTime + 0.05);
+        gain.gain.setValueAtTime(0.1, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.05);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.05);
+    }
+
+    function playSwapSound() {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+        osc.frequency.linearRampToValueAtTime(500, audioCtx.currentTime + 0.1);
+        gain.gain.setValueAtTime(0.15, audioCtx.currentTime);
+        gain.gain.linearRampToValueAtTime(0.01, audioCtx.currentTime + 0.1);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.1);
+    }
+
+    function playExplodeSound(comboLevel = 1) {
+        if (!audioCtx) return;
+        const osc = audioCtx.createOscillator(), gain = audioCtx.createGain();
+        const baseFreq = 400 + (comboLevel - 1) * 120;
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(baseFreq, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(150, audioCtx.currentTime + 0.15);
+        gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + 0.15);
+        osc.connect(gain); gain.connect(audioCtx.destination);
+        osc.start(); osc.stop(audioCtx.currentTime + 0.15);
+    }
+
+    let board = [], selectedTile = null, isAnimating = false;
+    let score = 0, combo = 1;
+    let particles = [], explodingTiles = [], shockwaves = [];
+    let idleTimer = null, currentHint = null, globalAngle = 0;
+    
+    let gameStarted = false;
+    const startBtn = { x: canvas.width / 2 - 75, y: canvas.height / 2 + 50, w: 150, h: 45 };
+    let shuffleNotice = { active: false, alpha: 0, text: "NO MORE MOVES!" };
+
+    function getRandomJewel() {
+        return Math.floor(Math.random() * JEWEL_TYPES.length);
+    }
+
+    // --- HÀM VẼ ĐỒ HỌA KIM CƯƠNG 3D PHA LÊ NÂNG CẤP ---
+    function drawJewel(x, y, type, scale = 1, alpha = 1, special = null, isHint = false) {
+        if (type === null || type === undefined) return;
+
+        const jewel = JEWEL_TYPES[type];
+        const cx = x + HALF_CELL;
+        const cy = y + HALF_CELL;
+        const r = (HALF_CELL - 7) * scale;
+
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.globalAlpha = Math.max(0, alpha);
+
+        // 1. Bóng đổ Neon phía sau (Glow Layer)
+        //ctx.shadowColor = isHint ? '#ffffff' : jewel.glow;
+        //ctx.shadowBlur = isHint ? 25 : 16;
+
+        // Helper vẽ đa giác và tô màu gradient
+        function drawPolygon(pts, fillStyle, strokeStyle = null) {
+            ctx.beginPath();
+            ctx.moveTo(pts[0].x, pts[0].y);
+            for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i].x, pts[i].y);
+            ctx.closePath();
+            ctx.fillStyle = fillStyle;
+            ctx.fill();
+            if (strokeStyle) {
+                ctx.strokeStyle = strokeStyle;
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            }
+        }
+
+        // Tạo Gradient cho mặt cắt 3D
+        const gradTop = ctx.createLinearGradient(0, -r, 0, 0);
+        gradTop.addColorStop(0, jewel.light);
+        gradTop.addColorStop(1, jewel.main);
+
+        const gradBottom = ctx.createLinearGradient(0, 0, 0, r);
+        gradBottom.addColorStop(0, jewel.main);
+        gradBottom.addColorStop(1, jewel.dark);
+
+        const gradLeft = ctx.createLinearGradient(-r, 0, 0, 0);
+        gradLeft.addColorStop(0, jewel.light);
+        gradLeft.addColorStop(1, jewel.main);
+
+        const gradRight = ctx.createLinearGradient(0, 0, r, 0);
+        gradRight.addColorStop(0, jewel.main);
+        gradRight.addColorStop(1, jewel.dark);
+
+        // 2. Vẽ hình khối 3D theo dạng mặt cắt (Facet Rendering)
+        switch (jewel.shape) {
+            case 'diamond': // Kim Cương 8 Mặt Vát
+                drawPolygon([{x:0, y:-r}, {x:r, y:0}, {x:0, y:r}, {x:-r, y:0}], jewel.dark);
+                drawPolygon([{x:0, y:-r}, {x:r, y:0}, {x:0, y:0}], gradTop);
+                drawPolygon([{x:0, y:-r}, {x:-r, y:0}, {x:0, y:0}], gradLeft);
+                drawPolygon([{x:0, y:r}, {x:r, y:0}, {x:0, y:0}], gradRight);
+                drawPolygon([{x:0, y:r}, {x:-r, y:0}, {x:0, y:0}], gradBottom);
+                // Mặt kính trung tâm
+                drawPolygon([{x:0, y:-r*0.5}, {x:r*0.5, y:0}, {x:0, y:r*0.5}, {x:-r*0.5, y:0}], 'rgba(255, 255, 255, 0.35)');
+                break;
+
+            case 'cyan': // Ngọc Cầu 3D Phản Quang Thủy Tinh
+                const sphereGrad = ctx.createRadialGradient(-r*0.35, -r*0.35, r*0.1, 0, 0, r);
+                sphereGrad.addColorStop(0, '#ffffff');
+                sphereGrad.addColorStop(0.25, jewel.light);
+                sphereGrad.addColorStop(0.65, jewel.main);
+                sphereGrad.addColorStop(1, jewel.dark);
+                
+                ctx.beginPath();
+                ctx.arc(0, 0, r * 0.9, 0, Math.PI * 2);
+                ctx.fillStyle = sphereGrad;
+                ctx.fill();
+
+                // Vệt vát sáng vòng ngoài
+                ctx.beginPath();
+                ctx.arc(0, 0, r * 0.82, Math.PI * 1.1, Math.PI * 1.9);
+                ctx.strokeStyle = 'rgba(255, 255, 255, 0.6)';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+                break;
+
+            case 'square': // Khối Lập Phương Vát Cạnh 3D
+                drawPolygon([{x:-r*0.8, y:-r*0.8}, {x:r*0.8, y:-r*0.8}, {x:r*0.8, y:r*0.8}, {x:-r*0.8, y:r*0.8}], jewel.dark);
+                // Các mặt vát nghiêng
+                drawPolygon([{x:-r*0.8, y:-r*0.8}, {x:r*0.8, y:-r*0.8}, {x:r*0.5, y:-r*0.5}, {x:-r*0.5, y:-r*0.5}], gradTop);
+                drawPolygon([{x:-r*0.8, y:-r*0.8}, {x:-r*0.8, y:r*0.8}, {x:-r*0.5, y:r*0.5}, {x:-r*0.5, y:-r*0.5}], gradLeft);
+                drawPolygon([{x:r*0.8, y:-r*0.8}, {x:r*0.8, y:r*0.8}, {x:r*0.5, y:r*0.5}, {x:r*0.5, y:-r*0.5}], gradRight);
+                drawPolygon([{x:-r*0.8, y:r*0.8}, {x:r*0.8, y:r*0.8}, {x:r*0.5, y:r*0.5}, {x:-r*0.5, y:r*0.5}], gradBottom);
+                // Mặt vuông chính giữa
+                drawPolygon([{x:-r*0.5, y:-r*0.5}, {x:r*0.5, y:-r*0.5}, {x:r*0.5, y:r*0.5}, {x:-r*0.5, y:r*0.5}], jewel.main, 'rgba(255, 255, 255, 0.4)');
+                break;
+
+            case 'triangle': // Kim Tự Tháp 3D
+                drawPolygon([{x:0, y:-r}, {x:r*0.9, y:r*0.8}, {x:-r*0.9, y:r*0.8}], jewel.dark);
+                drawPolygon([{x:0, y:-r}, {x:-r*0.9, y:r*0.8}, {x:0, y:r*0.2}], gradLeft);
+                drawPolygon([{x:0, y:-r}, {x:r*0.9, y:r*0.8}, {x:0, y:r*0.2}], gradRight);
+                drawPolygon([{x:-r*0.9, y:r*0.8}, {x:r*0.9, y:r*0.8}, {x:0, y:r*0.2}], gradBottom);
+                break;
+
+            case 'star': // Ngôi Sao Nổi Khối 3D
+                for (let i = 0; i < 4; i++) {
+                    ctx.rotate(Math.PI / 2);
+                    // Mặt sáng bên trái cánh ngôi sao
+                    drawPolygon([{x:0, y:0}, {x:0, y:-r}, {x:-r*0.3, y:-r*0.3}], gradLeft);
+                    // Mặt tối bên phải cánh ngôi sao
+                    drawPolygon([{x:0, y:0}, {x:0, y:-r}, {x:r*0.3, y:-r*0.3}], gradRight);
+                }
+                break;
+
+            case 'hexagon': // Lục Giác Pha Lê 3D
+                const pts = [];
+                for (let i = 0; i < 6; i++) {
+                    const a = (i * 60 - 30) * Math.PI / 180;
+                    pts.push({ x: r * 0.85 * Math.cos(a), y: r * 0.85 * Math.sin(a) });
+                }
+                drawPolygon(pts, jewel.dark);
+                // Các tam giác vát vào tâm
+                for (let i = 0; i < 6; i++) {
+                    const next = (i + 1) % 6;
+                    const fill = (i < 3) ? gradTop : gradBottom;
+                    drawPolygon([{x:0, y:0}, pts[i], pts[next]], fill, 'rgba(255,255,255,0.15)');
+                }
+                break;
+        }
+
+        // 3. Điểm sáng Phản Quang (Specular Highlight) cho tất cả các viên
+        //ctx.beginPath();
+        //ctx.ellipse(-r * 0.3, -r * 0.35, r * 0.22, r * 0.1, Math.PI / 4, 0, Math.PI * 2);
+        //ctx.fillStyle = 'rgba(255, 255, 255, 0.75)';
+        //ctx.shadowBlur = 0; // Tắt bớt shadow để điểm sáng sắc nét
+        //ctx.fill();
+
+        // 4. Hiệu ứng quét sáng khi Gợi Ý (Hint)
+        if (isHint) {
+            const shimmerPos = (Math.sin(Date.now() / 250) + 1) / 2;
+            const grad = ctx.createLinearGradient(-r, -r, r, r);
+            grad.addColorStop(Math.max(0, shimmerPos - 0.25), 'rgba(255, 255, 255, 0)');
+            grad.addColorStop(shimmerPos, 'rgba(255, 255, 255, 0.9)');
+            grad.addColorStop(Math.min(1, shimmerPos + 0.25), 'rgba(255, 255, 255, 0)');
+            ctx.fillStyle = grad;
+            ctx.fillRect(-r, -r, r * 2, r * 2);
+        }
+
+        // 5. Hiệu ứng Bom Năng Lượng 3D Quay
+        if (special === 'bomb') {
+            const pulse = Math.sin(Date.now() / 90) * 2;
+            ctx.rotate(globalAngle * 1.8);
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 2.5;
+            ctx.shadowColor = '#ffffff';
+            ctx.shadowBlur = 18;
+
+            for (let i = 0; i < 4; i++) {
+                ctx.rotate(Math.PI / 2);
+                ctx.beginPath();
+                ctx.arc(r + 1 + pulse, 0, 3.5, 0, Math.PI * 2);
+                ctx.fillStyle = '#ffffff';
+                ctx.fill();
+                ctx.stroke();
+            }
+        }
+        ctx.restore();
+    }
+
+    function drawHintCorners(x, y, alpha) {
+        const pad = 4, len = 10;
+        const left = x + pad, right = x + CELL_SIZE - pad;
+        const top = y + pad, bottom = y + CELL_SIZE - pad;
+
+        ctx.save();
+        ctx.strokeStyle = `rgba(0, 243, 255, ${alpha})`;
+        ctx.shadowColor = '#00f3ff';
+        ctx.shadowBlur = 10;
+        ctx.lineWidth = 2.5;
+        ctx.lineCap = 'round';
+
+        ctx.beginPath();
+        ctx.moveTo(left, top + len); ctx.lineTo(left, top); ctx.lineTo(left + len, top);
+        ctx.moveTo(right - len, top); ctx.lineTo(right, top); ctx.lineTo(right, top + len);
+        ctx.moveTo(right, bottom - len); ctx.lineTo(right, bottom); ctx.lineTo(right - len, bottom);
+        ctx.moveTo(left + len, bottom); ctx.lineTo(left, bottom); ctx.lineTo(left, bottom - len);
+        ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawStartOverlay() {
+        ctx.save();
+        ctx.fillStyle = 'rgba(8, 8, 18, 0.88)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.font = 'bold 22px sans-serif';
+        ctx.fillStyle = '#00f3ff';
+        ctx.textAlign = 'center';
+        ctx.shadowColor = '#00f3ff';
+        ctx.shadowBlur = 12;
+        ctx.fillText('HƯỚNG DẪN CHƠI', canvas.width / 2, canvas.height / 2 - 80);
+
+        ctx.font = '14px sans-serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowBlur = 0;
+        ctx.fillText('Hoán đổi các viên ngọc kề nhau', canvas.width / 2, canvas.height / 2 - 35);
+        ctx.fillText('để tạo hàng 3 viên cùng màu trở lên.', canvas.width / 2, canvas.height / 2 - 10);
+
+        ctx.fillStyle = '#ff0055';
+        ctx.shadowColor = '#ff0055';
+        ctx.shadowBlur = 15;
+        ctx.beginPath();
+        ctx.roundRect(startBtn.x, startBtn.y, startBtn.w, startBtn.h, 12);
+        ctx.fill();
+
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillStyle = '#ffffff';
+        ctx.shadowBlur = 0;
+        ctx.fillText('BẮT ĐẦU', canvas.width / 2, startBtn.y + 28);
+        ctx.restore();
+    }
+
+    function draw() {
+        globalAngle += 0.03;
+        ctx.fillStyle = '#080812';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // Lưới bàn chơi
+        ctx.strokeStyle = 'rgba(255, 255, 255, 0.04)';
+        ctx.lineWidth = 1;
+        for (let c = 0; c <= GRID_COLS; c++) {
+            ctx.beginPath(); ctx.moveTo(c * CELL_SIZE, 0); ctx.lineTo(c * CELL_SIZE, canvas.height); ctx.stroke();
+        }
+        for (let r = 0; r <= GRID_ROWS; r++) {
+            ctx.beginPath(); ctx.moveTo(0, r * CELL_SIZE); ctx.lineTo(canvas.width, r * CELL_SIZE); ctx.stroke();
+        }
+
+        // Ô được chọn
+        if (selectedTile) {
+            ctx.save();
+            ctx.strokeStyle = '#ffffff';
+            ctx.shadowColor = '#ffffff';
+            ctx.shadowBlur = 12;
+            ctx.lineWidth = 2.5;
+            ctx.strokeRect(selectedTile.c * CELL_SIZE + 2, selectedTile.r * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+            ctx.restore();
+        }
+
+        // Hiển thị gợi ý
+        if (currentHint && gameStarted) {
+            const alphaPulse = (Math.sin(Date.now() / 200) + 1) / 2 * 0.7 + 0.3;
+            drawHintCorners(currentHint.c1 * CELL_SIZE, currentHint.r1 * CELL_SIZE, alphaPulse);
+            drawHintCorners(currentHint.c2 * CELL_SIZE, currentHint.r2 * CELL_SIZE, alphaPulse);
+        }
+
+        // Vẽ Ngọc trên lưới
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                let item = board[r][c];
+                if (item && item.type !== null) {
+                    let isHint = gameStarted && currentHint && (
+                        (currentHint.r1 === r && currentHint.c1 === c) || 
+                        (currentHint.r2 === r && currentHint.c2 === c)
+                    );
+                    drawJewel(item.x, item.y, item.type, item.scale, item.alpha, item.special, isHint);
+                }
+            }
+        }
+
+        // Sóng xung kích (Shockwaves)
+        for (let i = shockwaves.length - 1; i >= 0; i--) {
+            let sw = shockwaves[i];
+            ctx.save();
+            if (sw.type === 'bomb') {
+                sw.radius += 7; sw.alpha -= 0.04;
+                ctx.globalAlpha = Math.max(0, sw.alpha);
+                ctx.strokeStyle = sw.color; ctx.shadowColor = sw.color;
+                ctx.shadowBlur = 20; ctx.lineWidth = 4;
+                ctx.beginPath(); ctx.arc(sw.x, sw.y, sw.radius, 0, Math.PI * 2); ctx.stroke();
+            } else if (sw.type === 'line') {
+                sw.width += 6; sw.alpha -= 0.05;
+                ctx.globalAlpha = Math.max(0, sw.alpha);
+                ctx.fillStyle = sw.color; ctx.shadowColor = '#ffffff';
+                ctx.shadowBlur = 20;
+                ctx.fillRect(0, sw.y - sw.width / 2, canvas.width, sw.width);
+                ctx.fillRect(sw.x - sw.width / 2, 0, sw.width, canvas.height);
+            }
+            ctx.restore();
+            if (sw.alpha <= 0) shockwaves.splice(i, 1);
+        }
+
+        // Ngọc đang nổ thu nhỏ
+        for (let i = explodingTiles.length - 1; i >= 0; i--) {
+            let eTile = explodingTiles[i];
+            drawJewel(eTile.x, eTile.y, eTile.type, eTile.scale, eTile.alpha, eTile.special);
+            eTile.scale -= 0.06; eTile.alpha -= 0.06;
+            if (eTile.alpha <= 0) explodingTiles.splice(i, 1);
+        }
+
+        // Hạt Nổ Kim Cương tỏa sáng (Sparkling Particles)
+        for (let i = particles.length - 1; i >= 0; i--) {
+            let p = particles[i];
+            p.x += p.vx; p.y += p.vy; 
+            p.vy += 0.12; // Trọng lực rơi
+            p.alpha -= p.decay;
+            if (p.alpha <= 0) {
+                particles.splice(i, 1);
+            } else {
+                ctx.save();
+                ctx.globalAlpha = Math.max(0, p.alpha);
+                ctx.fillStyle = p.color;
+                ctx.shadowColor = p.color;
+                ctx.shadowBlur = 10;
+                
+                ctx.translate(p.x, p.y);
+                ctx.rotate(p.rotation);
+                p.rotation += 0.15;
+                ctx.fillRect(-p.size / 2, -p.size / 2, p.size, p.size);
+                ctx.restore();
+            }
+        }
+
+        // Thông báo Trộn Bàn
+        if (shuffleNotice.active) {
+            ctx.save();
+            ctx.globalAlpha = shuffleNotice.alpha;
+            ctx.fillStyle = 'rgba(10, 10, 20, 0.85)';
+            ctx.fillRect(0, canvas.height / 2 - 40, canvas.width, 80);
+
+            ctx.font = 'bold 20px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = '#ff00f0';
+            ctx.shadowColor = '#ff00f0';
+            ctx.shadowBlur = 15;
+            ctx.fillText(shuffleNotice.text, canvas.width / 2, canvas.height / 2);
+            ctx.restore();
+        }
+
+        if (!gameStarted) {
+            drawStartOverlay();
+        }
+    }
+
+    function createParticles(x, y, color, count = 18) {
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const speed = Math.random() * 6 + 2;
+            particles.push({
+                x: x, y: y,
+                vx: Math.cos(angle) * speed,
+                vy: Math.sin(angle) * speed,
+                size: Math.random() * 4 + 2,
+                color: color, 
+                alpha: 1,
+                decay: Math.random() * 0.025 + 0.015,
+                rotation: Math.random() * Math.PI
+            });
+        }
+    }
+
+    function checkMatches() {
+        let matchGroups = [];
+
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS - 2; c++) {
+                let type = board[r][c]?.type;
+                if (type !== null && type !== undefined) {
+                    let match = [{r, c}];
+                    let k = c + 1;
+                    while (k < GRID_COLS && board[r][k]?.type === type) {
+                        match.push({r, c: k});
+                        k++;
+                    }
+                    if (match.length >= 3) {
+                        matchGroups.push(match);
+                        c = k - 1;
+                    }
+                }
+            }
+        }
+
+        for (let c = 0; c < GRID_COLS; c++) {
+            for (let r = 0; r < GRID_ROWS - 2; r++) {
+                let type = board[r][c]?.type;
+                if (type !== null && type !== undefined) {
+                    let match = [{r, c}];
+                    let k = r + 1;
+                    while (k < GRID_ROWS && board[k][c]?.type === type) {
+                        match.push({r: k, c});
+                        k++;
+                    }
+                    if (match.length >= 3) {
+                        matchGroups.push(match);
+                        r = k - 1;
+                    }
+                }
+            }
+        }
+
+        let allMatches = [];
+        let specialCreations = [];
+        let instantLineBlastCenters = [];
+
+        matchGroups.forEach(group => {
+            allMatches.push(...group);
+            let midIndex = Math.floor(group.length / 2);
+
+            if (group.length >= 5) {
+                instantLineBlastCenters.push({ r: group[midIndex].r, c: group[midIndex].c });
+            } else if (group.length === 4) {
+                specialCreations.push({
+                    r: group[midIndex].r, c: group[midIndex].c,
+                    type: board[group[midIndex].r][group[midIndex].c].type,
+                    special: 'bomb'
+                });
+            }
+        });
+
+        let uniqueMatches = allMatches.filter((v, i, a) => a.findIndex(t => (t.r === v.r && t.c === v.c)) === i);
+        return { matches: uniqueMatches, specialCreations, instantLineBlastCenters };
+    }
+
+    function findPossibleMove() {
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                if (c < GRID_COLS - 1) {
+                    swapTypes(r, c, r, c + 1);
+                    let matches = checkMatches().matches;
+                    swapTypes(r, c, r, c + 1);
+                    if (matches.length > 0) return { r1: r, c1: c, r2: r, c2: c + 1 };
+                }
+                if (r < GRID_ROWS - 1) {
+                    swapTypes(r, c, r + 1, c);
+                    let matches = checkMatches().matches;
+                    swapTypes(r, c, r + 1, c);
+                    if (matches.length > 0) return { r1: r, c1: c, r2: r + 1, c2: c };
+                }
+            }
+        }
+        return null;
+    }
+
+    function swapTypes(r1, c1, r2, c2) {
+        let temp = board[r1][c1];
+        board[r1][c1] = board[r2][c2];
+        board[r2][c2] = temp;
+    }
+
+    function hasPossibleMoves() {
+        return findPossibleMove() !== null;
+    }
+
+    function resetIdleTimer() {
+        currentHint = null;
+        clearTimeout(idleTimer);
+        if (gameStarted) {
+            idleTimer = setTimeout(triggerHintOrShuffle, 8000);
+        }
+    }
+
+    function triggerHintOrShuffle() {
+        if (isAnimating || !gameStarted) { resetIdleTimer(); return; }
+        const move = findPossibleMove();
+        if (move) currentHint = move;
+        else shuffleBoard();
+    }
+
+    function showShuffleNotice(text, duration = 1200) {
+        return new Promise(resolve => {
+            shuffleNotice.text = text;
+            shuffleNotice.active = true;
+            shuffleNotice.alpha = 0;
+
+            const startTime = performance.now();
+            function step(now) {
+                let elapsed = now - startTime;
+                if (elapsed < 200) shuffleNotice.alpha = elapsed / 200;
+                else if (elapsed < duration - 200) shuffleNotice.alpha = 1;
+                else if (elapsed < duration) shuffleNotice.alpha = (duration - elapsed) / 200;
+                else {
+                    shuffleNotice.active = false;
+                    shuffleNotice.alpha = 0;
+                    resolve();
+                    return;
+                }
+                requestAnimationFrame(step);
+            }
+            requestAnimationFrame(step);
+        });
+    }
+
+    async function shuffleBoard() {
+        isAnimating = true;
+        currentHint = null;
+
+        await showShuffleNotice("NO MORE MOVE!");
+
+        const shrinkDuration = 250;
+        const startTime = performance.now();
+        await new Promise(res => {
+            function shrinkStep(now) {
+                let progress = Math.min((now - startTime) / shrinkDuration, 1);
+                for (let r = 0; r < GRID_ROWS; r++) {
+                    for (let c = 0; c < GRID_COLS; c++) {
+                        if (board[r][c]) {
+                            board[r][c].scale = 1 - progress;
+                            board[r][c].alpha = 1 - progress;
+                        }
+                    }
+                }
+                if (progress < 1) requestAnimationFrame(shrinkStep);
+                else res();
+            }
+            requestAnimationFrame(shrinkStep);
+        });
+
+        let existingBombs = [];
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                if (board[r][c] && board[r][c].special === 'bomb') {
+                    existingBombs.push({ type: board[r][c].type, special: 'bomb' });
+                }
+            }
+        }
+
+        do {
+            for (let r = 0; r < GRID_ROWS; r++) {
+                for (let c = 0; c < GRID_COLS; c++) {
+                    board[r][c] = {
+                        type: getRandomJewel(), special: null,
+                        x: c * CELL_SIZE, y: -CELL_SIZE * (GRID_ROWS - r),
+                        scale: 1, alpha: 1
+                    };
+                }
+            }
+
+            let availablePositions = [];
+            for (let r = 0; r < GRID_ROWS; r++) {
+                for (let c = 0; c < GRID_COLS; c++) availablePositions.push({ r, c });
+            }
+
+            existingBombs.forEach(bomb => {
+                if (availablePositions.length > 0) {
+                    let randIdx = Math.floor(Math.random() * availablePositions.length);
+                    let pos = availablePositions.splice(randIdx, 1)[0];
+                    board[pos.r][pos.c].special = 'bomb';
+                    board[pos.r][pos.c].type = bomb.type;
+                }
+            });
+
+        } while (checkMatches().matches.length > 0 || !hasPossibleMoves());
+
+        await animateFall(350);
+        isAnimating = false;
+        resetIdleTimer();
+    }
+
+    function initBoard() {
+        do {
+            board = [];
+            for (let r = 0; r < GRID_ROWS; r++) {
+                board[r] = [];
+                for (let c = 0; c < GRID_COLS; c++) {
+                    board[r][c] = {
+                        type: getRandomJewel(), special: null,
+                        x: c * CELL_SIZE, y: r * CELL_SIZE,
+                        scale: 1, alpha: 1
+                    };
+                }
+            }
+        } while (checkMatches().matches.length > 0 || !hasPossibleMoves());
+    }
+
+    function animateSwap(r1, c1, r2, c2, duration = 160) {
+        playSwapSound();
+        return new Promise(resolve => {
+            const item1 = board[r1][c1], item2 = board[r2][c2];
+            const startX1 = item1.x, startY1 = item1.y;
+            const startX2 = item2.x, startY2 = item2.y;
+            const targetX1 = c2 * CELL_SIZE, targetY1 = r2 * CELL_SIZE;
+            const targetX2 = c1 * CELL_SIZE, targetY2 = r1 * CELL_SIZE;
+            const startTime = performance.now();
+
+            function step(now) {
+                let progress = Math.min((now - startTime) / duration, 1);
+                item1.x = startX1 + (targetX1 - startX1) * progress;
+                item1.y = startY1 + (targetY1 - startY1) * progress;
+                item2.x = startX2 + (targetX2 - startX2) * progress;
+                item2.y = startY2 + (targetY2 - startY2) * progress;
+
+                if (progress < 1) requestAnimationFrame(step);
+                else {
+                    board[r1][c1] = item2;
+                    board[r2][c2] = item1;
+                    resolve();
+                }
+            }
+            requestAnimationFrame(step);
+        });
+    }
+
+    function animateFall(duration = 250) {
+        return new Promise(resolve => {
+            const startTime = performance.now();
+            let animates = [];
+
+            for (let r = 0; r < GRID_ROWS; r++) {
+                for (let c = 0; c < GRID_COLS; c++) {
+                    let item = board[r][c];
+                    let targetY = r * CELL_SIZE;
+                    if (item.y !== targetY) animates.push({ item, startY: item.y, targetY });
+                }
+            }
+
+            if (animates.length === 0) { resolve(); return; }
+
+            function step(now) {
+                let progress = Math.min((now - startTime) / duration, 1);
+                let easeProgress = progress * progress;
+
+                animates.forEach(a => {
+                    a.item.y = a.startY + (a.targetY - a.startY) * easeProgress;
+                });
+
+                if (progress < 1) requestAnimationFrame(step);
+                else {
+                    animates.forEach(a => a.item.y = a.targetY);
+                    resolve();
+                }
+            }
+            requestAnimationFrame(step);
+        });
+    }
+
+    async function handleMatches() {
+        let { matches, specialCreations, instantLineBlastCenters } = checkMatches();
+        if (matches.length === 0) {
+            combo = 1;
+            comboEl.textContent = `x${combo}`;
+            isAnimating = false;
+            if (!hasPossibleMoves()) await shuffleBoard();
+            else resetIdleTimer();
+            return;
+        }
+
+        playExplodeSound(combo);
+        let tilesToDestroy = new Set();
+        matches.forEach(m => tilesToDestroy.add(`${m.r},${m.c}`));
+
+        instantLineBlastCenters.forEach(center => {
+            const cx = center.c * CELL_SIZE + HALF_CELL;
+            const cy = center.r * CELL_SIZE + HALF_CELL;
+            shockwaves.push({ x: cx, y: cy, width: 8, alpha: 1, type: 'line', color: '#ffffff' });
+            for (let i = 0; i < GRID_COLS; i++) tilesToDestroy.add(`${center.r},${i}`);
+            for (let i = 0; i < GRID_ROWS; i++) tilesToDestroy.add(`${i},${center.c}`);
+        });
+
+        let addedMore = true;
+        while (addedMore) {
+            addedMore = false;
+            let currentDestroyed = Array.from(tilesToDestroy).map(key => {
+                let [r, c] = key.split(',').map(Number);
+                return {r, c};
+            });
+
+            currentDestroyed.forEach(m => {
+                let item = board[m.r][m.c];
+                if (item && item.special === 'bomb') {
+                    const cx = m.c * CELL_SIZE + HALF_CELL;
+                    const cy = m.r * CELL_SIZE + HALF_CELL;
+                    shockwaves.push({ x: cx, y: cy, radius: 10, alpha: 1, type: 'bomb', color: JEWEL_TYPES[item.type].glow });
+                    for (let dr = -1; dr <= 1; dr++) {
+                        for (let dc = -1; dc <= 1; dc++) {
+                            let nr = m.r + dr, nc = m.c + dc;
+                            if (nr >= 0 && nr < GRID_ROWS && nc >= 0 && nc < GRID_COLS) {
+                                if (!tilesToDestroy.has(`${nr},${nc}`)) {
+                                    tilesToDestroy.add(`${nr},${nc}`);
+                                    addedMore = true;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        let finalTilesList = Array.from(tilesToDestroy).map(key => {
+            let [r, c] = key.split(',').map(Number);
+            return {r, c};
+        });
+
+        score += finalTilesList.length * 10 * combo;
+        scoreEl.textContent = score;
+        comboEl.textContent = `x${combo}`;
+
+        finalTilesList.forEach(m => {
+            let item = board[m.r][m.c];
+            if (item && item.type !== null) {
+                explodingTiles.push({
+                    x: item.x, y: item.y,
+                    type: item.type, special: item.special,
+                    scale: 1, alpha: 1
+                });
+                createParticles(
+                    item.x + HALF_CELL, item.y + HALF_CELL,
+                    JEWEL_TYPES[item.type].glow,
+                    item.special ? 35 : 18
+                );
+                board[m.r][m.c] = null;
+            }
+        });
+
+        specialCreations.forEach(sc => {
+            board[sc.r][sc.c] = {
+                type: sc.type, special: sc.special,
+                x: sc.c * CELL_SIZE, y: sc.r * CELL_SIZE,
+                scale: 1, alpha: 1
+            };
+        });
+
+        await new Promise(res => setTimeout(res, 220));
+
+        for (let c = 0; c < GRID_COLS; c++) {
+            let emptyRow = GRID_ROWS - 1;
+            for (let r = GRID_ROWS - 1; r >= 0; r--) {
+                if (board[r][c] !== null) {
+                    if (r !== emptyRow) {
+                        board[emptyRow][c] = board[r][c];
+                        board[r][c] = null;
+                    }
+                    emptyRow--;
+                }
+            }
+            for (let r = emptyRow; r >= 0; r--) {
+                board[r][c] = {
+                    type: getRandomJewel(), special: null,
+                    x: c * CELL_SIZE, y: (r - (emptyRow + 1)) * CELL_SIZE,
+                    scale: 1, alpha: 1
+                };
+            }
+        }
+
+        await animateFall(250);
+        combo++;
+        await handleMatches();
+    }
+
+    let startX = 0, startY = 0, isDragging = false;
+
+    function getPos(e) {
+        const rect = canvas.getBoundingClientRect();
+        const clientX = e.touches ? e.touches[0].clientX : e.clientX;
+        const clientY = e.touches ? e.touches[0].clientY : e.clientY;
+        return {
+            c: Math.floor((clientX - rect.left) / CELL_SIZE),
+            r: Math.floor((clientY - rect.top) / CELL_SIZE),
+            rawX: clientX, rawY: clientY,
+            canvasX: clientX - rect.left, canvasY: clientY - rect.top
+        };
+    }
+
+    async function trySwap(r1, c1, r2, c2) {
+        if (r2 < 0 || r2 >= GRID_ROWS || c2 < 0 || c2 >= GRID_COLS) return;
+        isAnimating = true; currentHint = null; selectedTile = null;
+
+        await animateSwap(r1, c1, r2, c2, 160);
+        let { matches } = checkMatches();
+        if (matches.length > 0) {
+            await handleMatches();
+        } else {
+            await animateSwap(r1, c1, r2, c2, 160);
+            isAnimating = false;
+            resetIdleTimer();
+        }
+    }
+
+    function handleStart(e) {
+        initAudio();
+        const pos = getPos(e);
+
+        if (!gameStarted) {
+            if (pos.canvasX >= startBtn.x && pos.canvasX <= startBtn.x + startBtn.w &&
+                pos.canvasY >= startBtn.y && pos.canvasY <= startBtn.y + startBtn.h) {
+                gameStarted = true;
+                playSelectSound();
+                resetIdleTimer();
+            }
+            return;
+        }
+
+        if (isAnimating) return;
+        resetIdleTimer();
+        isDragging = true;
+        startX = pos.rawX; startY = pos.rawY;
+        selectedTile = { r: pos.r, c: pos.c };
+        playSelectSound();
+    }
+
+    function handleEnd(e) {
+        if (!gameStarted || !isDragging || isAnimating || !selectedTile) { isDragging = false; return; }
+        const endX = e.changedTouches ? e.changedTouches[0].clientX : e.clientX;
+        const endY = e.changedTouches ? e.changedTouches[0].clientY : e.clientY;
+        const diffX = endX - startX, diffY = endY - startY;
+        const threshold = 18;
+
+        const r1 = selectedTile.r, c1 = selectedTile.c;
+        if (Math.abs(diffX) > threshold || Math.abs(diffY) > threshold) {
+            let r2 = r1, c2 = c1;
+            if (Math.abs(diffX) > Math.abs(diffY)) c2 += (diffX > 0) ? 1 : -1;
+            else r2 += (diffY > 0) ? 1 : -1;
+            trySwap(r1, c1, r2, c2);
+        }
+        isDragging = false;
+    }
+
+    canvas.addEventListener('touchstart', (e) => { e.preventDefault(); handleStart(e); }, { passive: false });
+    canvas.addEventListener('touchend', (e) => { e.preventDefault(); handleEnd(e); }, { passive: false });
+    canvas.addEventListener('mousedown', handleStart);
+    canvas.addEventListener('mouseup', handleEnd);
+
+    function gameLoop() {
+        draw();
+        requestAnimationFrame(gameLoop);
+    }
+
+    initBoard();
+    gameLoop();
+});
+</script>
+</body>
+</html>
